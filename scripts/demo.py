@@ -1,52 +1,101 @@
 import numpy as np
 import torch
-from PIL import Image
+import cv2
+import argparse
+from tqdm import tqdm
+import os
 
-from unidepth.models import UniDepthV1, UniDepthV2
-from unidepth.utils import colorize, image_grid
+from unidepth.models import UniDepthV2
+from unidepth.utils import colorize
 
+def process_video(video_path, output_dir):
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
 
-def demo(model):
-    rgb = np.array(Image.open("assets/demo/rgb.png"))
-    rgb_torch = torch.from_numpy(rgb).permute(2, 0, 1)
-    intrinsics_torch = torch.from_numpy(np.load("assets/demo/intrinsics.npy"))
-
-    # predict
-    predictions = model.infer(rgb_torch, intrinsics_torch)
-
-    # get GT and pred
-    depth_pred = predictions["depth"].squeeze().cpu().numpy()
-    depth_gt = np.array(Image.open("assets/demo/depth.png")).astype(float) / 1000.0
-
-    # compute error, you have zero divison where depth_gt == 0.0
-    depth_arel = np.abs(depth_gt - depth_pred) / depth_gt
-    depth_arel[depth_gt == 0.0] = 0.0
-
-    # colorize
-    depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=10.0, cmap="magma_r")
-    depth_gt_col = colorize(depth_gt, vmin=0.01, vmax=10.0, cmap="magma_r")
-    depth_error_col = colorize(depth_arel, vmin=0.0, vmax=0.2, cmap="coolwarm")
-
-    # save image with pred and error
-    artifact = image_grid([rgb, depth_gt_col, depth_pred_col, depth_error_col], 2, 2)
-    Image.fromarray(artifact).save("assets/demo/output.png")
-
-    print("Available predictions:", list(predictions.keys()))
-    print(f"ARel: {depth_arel[depth_gt > 0].mean() * 100:.2f}%")
-
-
-if __name__ == "__main__":
-    print("Torch version:", torch.__version__)
-    name = "unidepth-v2-vitl14"
-    # model = UniDepthV1.from_pretrained("lpiccinelli/unidepth-v1-vitl14")
-    model = UniDepthV2.from_pretrained(f"lpiccinelli/{name}")
-
-    # set resolution level (only V2)
-    # model.resolution_level = 0
-
-    # set interpolation mode (only V2)
-    # model.interpolation_mode = "bilinear"
-
+    # Load the model
+    model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitl14")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    demo(model)
+
+    # Open the video
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    for frame_num in tqdm(range(total_frames), desc="Processing frames"):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Preprocess frame
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, (640, 480))
+        rgb_torch = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
+
+        # Predict depth
+        with torch.no_grad():
+            predictions = model.infer(rgb_torch.unsqueeze(0).to(device))
+
+        # Get depth prediction
+        depth_pred = predictions["depth"].squeeze().cpu().numpy()
+
+        # Save depth map as .npz
+        np.savez_compressed(os.path.join(output_dir, f"{frame_num:06d}.npz"), depth=depth_pred)
+
+    # Release resources
+    cap.release()
+
+    print(f"Depth maps saved in {output_dir}")
+
+def debug_video(video_path, output_dir):
+    # Open the video
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # Prepare for debug video
+    debug_video_path = os.path.join(output_dir, "debug_depth_video.mp4")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(debug_video_path, fourcc, fps, (640, 480))
+
+    for frame_num in tqdm(range(total_frames), desc="debug video"):
+        depth_pred = load_depth_map(output_dir, frame_num)
+
+        if depth_pred is not None:
+            # Determine the deepest point (max depth) in the depth map for this frame
+            vmax = depth_pred.max()
+
+            # Colorize the depth map with dynamic vmax
+            depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=vmax, cmap="magma_r")
+            debug_frame = cv2.cvtColor(depth_pred_col, cv2.COLOR_RGB2BGR)
+            out.write(debug_frame)
+        else:
+            print(f"Warning: Depth map for frame {frame_num} is missing or empty.")
+
+    out.release()
+    print(f"Debug video saved as {debug_video_path}")
+
+def load_depth_map(output_dir, frame_num):
+    depth_file = os.path.join(output_dir, f'{frame_num:06d}.npz')
+    if os.path.exists(depth_file):
+        with np.load(depth_file) as data:
+            # Try to get the first key in the archive
+            keys = list(data.keys())
+            if keys:
+                return data[keys[0]]
+            else:
+                print(f"Warning: No data found in {depth_file}")
+                return None
+    else:
+        print(f"Warning: Depth file not found: {depth_file}")
+        return None
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process video for depth mapping")
+    parser.add_argument("video_path", type=str, help="Path to the input video")
+    parser.add_argument("output_dir", type=str, help="Directory to save output files")
+    args = parser.parse_args()
+
+    print("Torch version:", torch.__version__)
+
+    process_video(args.video_path, args.output_dir)
+    debug_video(args.video_path, args.output_dir)

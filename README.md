@@ -16,6 +16,7 @@
 > CVPR 2024,  
 > *Paper at [arXiv 2403.18913](https://arxiv.org/pdf/2403.18913.pdf)*  
 
+safetensor: https://huggingface.co/lpiccinelli/unidepth-v2-vitl14
 
 ## News and ToDo
 
