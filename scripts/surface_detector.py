@@ -55,14 +55,25 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
         return True
 
-    def analyze_floor_slope(depths, y_coords, wall_depth, slope_jump_threshold=20):
+    def detect_intersection_open_floor_to_wall(depths, y_coords):
+        """Detect the most extreme discontinuity as the wall intersection for open-floor scenarios."""
+        # Define y range for detecting discontinuity
+        valid_indices = [i for i, y in enumerate(y_coords) if 380 >= y >= 100]
+        filtered_depths = np.array([depths[i] for i in valid_indices])
+        filtered_y_coords = np.array([y_coords[i] for i in valid_indices])
+
+        # Calculate absolute differences in depth to detect the largest discontinuity
+        depth_diffs = np.abs(np.diff(filtered_depths))
+        max_discontinuity_idx = np.argmax(depth_diffs)
+
+        # Get the y-coordinate and depth at the discontinuity point
+        discontinuity_y = int(filtered_y_coords[max_discontinuity_idx])
+        return discontinuity_y if 380 >= discontinuity_y >= 100 else None
+
+    def detect_intersection_with_obstacle(depths, y_coords, wall_depth, slope_jump_threshold=20):
         """Analyze floor using a monotonic spline fit and extrapolate to find wall intersection point."""
         if len(depths) < 30:  # Need enough points for at least 3 groups
             return None, None
-
-        # Reverse arrays to work from bottom up
-        depths = depths[::-1]
-        y_coords = y_coords[::-1]
 
         # Calculate average slopes for groups of 10 points
         group_size = 10
@@ -123,7 +134,8 @@ def find_wall_floor_intersections_for_frame(depth_map):
         sequence_depths = np.array(depths[start_idx:end_idx])
         sequence_y = np.array(y_coords[start_idx:end_idx])
 
-        # Apply monotonic spline fit using PchipInterpolator
+        """Extrapolate spline behind obstacles to find the wall intersection."""
+        # Apply monotonic spline fit
         try:
             spline = PchipInterpolator(sequence_depths, sequence_y, extrapolate=False)
         except ValueError:
@@ -145,13 +157,36 @@ def find_wall_floor_intersections_for_frame(depth_map):
             return result
 
         try:
-            intersection_y = fitted_func(wall_depth)
+            intersection_y = int(fitted_func(wall_depth))
             if np.isnan(intersection_y) or 0 > intersection_y or intersection_y > 480:
                 intersection_y = None
         except Exception:
             intersection_y = None
 
         return fitted_func, intersection_y
+
+    def analyze_floor_wall_intersection(depths, y_coords, wall_depth):
+        """Main function to determine floor-wall intersection mode and detect intersection point."""
+        if len(depths) < 30:  # Ensure sufficient data points
+            return None, None
+
+        # Reverse arrays to work from bottom up
+        depths = depths[::-1]
+        y_coords = y_coords[::-1]
+
+        # Check for open-floor mode by verifying increasing depth within 100 <= y <= 380
+        for i in range(len(depths) - 1):
+            # Only check depths where 100 <= y <= 380
+            if not (100 <= y_coords[i] <= 380):
+                continue
+
+            # If a shallower depth is detected, switch to obstacle mode
+            if depths[i] > depths[i + 1] + 0.1:
+                # Mode 2: Intersection behind obstacle
+                return detect_intersection_with_obstacle(depths, y_coords, wall_depth)
+
+        # Mode 1: Open-floor, find discontinuity
+        return None, detect_intersection_open_floor_to_wall(depths, y_coords)
 
     def analyze_edge_slope(depths, x_coords, from_left=True):
         """Analyze wall slope at frame edges"""
@@ -245,7 +280,7 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
         if wall_depth is not None:
             # Find floor curve starting from bottom of frame
-            floor_func, intersect_y = analyze_floor_slope(valid_depths, valid_y, wall_depth)
+            _, intersect_y = analyze_floor_wall_intersection(valid_depths, valid_y, wall_depth)
 
             if intersect_y is not None:
                 frame_x = x
