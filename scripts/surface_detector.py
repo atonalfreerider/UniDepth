@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.cluster import DBSCAN
+from scipy.optimize import curve_fit
 
 
 def find_wall_floor_intersections_for_frame(depth_map):
@@ -34,15 +35,6 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
         return np.mean(wall_depths) if len(wall_depths) >= min_points else None
 
-    def fit_quadratic(x, y):
-        """Fit quadratic curve to points: y = ax² + bx + c"""
-        A = np.vstack([x ** 2, x, np.ones(len(x))]).T
-        try:
-            a, b, c = np.linalg.lstsq(A, y, rcond=None)[0]
-            return lambda x_new: a * x_new ** 2 + b * x_new + c, (a, b, c)
-        except:
-            return None, None
-
     def analyze_corner_point(depths, max_depth_idx, window_size=5):
         """Verify corner point by checking depth consistency of adjacent points"""
         if max_depth_idx < window_size or max_depth_idx >= len(depths) - window_size:
@@ -65,7 +57,7 @@ def find_wall_floor_intersections_for_frame(depth_map):
         return True
 
     def analyze_floor_slope(depths, y_coords):
-        """Analyze floor using quadratic regression, validating with decreasing slopes"""
+        """Analyze floor using a monotonic fit to simulate depth increasing toward a wall"""
         if len(depths) < 30:  # Need enough points for at least 3 groups
             return None, None
 
@@ -121,18 +113,29 @@ def find_wall_floor_intersections_for_frame(depth_map):
         # Get the range of points covered by the longest sequence
         start_idx = longest_sequence[0][1]
         end_idx = longest_sequence[-1][1] + group_size
-        
-        # Fit quadratic to all points in the valid sequence
+
+        # Select the points within this range for fitting and normalize depths
         sequence_depths = depths[start_idx:end_idx]
         sequence_y = y_coords[start_idx:end_idx]
-        
-        points = np.array(list(zip(sequence_depths, sequence_y)))
-        quad_func, params = fit_quadratic(points[:, 0], points[:, 1])
-        
-        if quad_func is None:
+        max_depth = max(sequence_depths)
+        normalized_depths = sequence_depths / max_depth  # Scale to range [0, 1]
+
+        # Define an exponential decay function for a monotonic fit with bounded parameters
+        def exp_decay(x, a, b, c):
+            return a * np.exp(-b * x) + c
+
+        # Fit the data using exponential decay with bounds
+        try:
+            params, pcov = curve_fit(exp_decay, normalized_depths, sequence_y, bounds=(0, [np.inf, 1, np.inf]), maxfev=10000)
+        except RuntimeError:
             return None, None
-        
-        return quad_func, params
+
+        # Define the fitted function using the parameters
+        def fitted_func(x):
+            return exp_decay(x / max_depth, *params)  # Scale input to fit function
+
+
+        return fitted_func, params
 
     def analyze_edge_slope(depths, x_coords, from_left=True):
         """Analyze wall slope at frame edges"""
@@ -293,7 +296,6 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
         if len(valid_depths) < depth_map.shape[0] * 0.3:
             continue
-
 
     # Process horizontal stripes for corner detection
     corner_candidates = []
