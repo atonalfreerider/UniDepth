@@ -1,7 +1,6 @@
 import numpy as np
 from sklearn.cluster import DBSCAN
-from scipy.optimize import curve_fit
-
+from scipy.interpolate import PchipInterpolator
 
 def find_wall_floor_intersections_for_frame(depth_map):
     """Find wall-floor and wall-wall intersections using vertical stripe analysis"""
@@ -56,8 +55,8 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
         return True
 
-    def analyze_floor_slope(depths, y_coords):
-        """Analyze floor using a monotonic fit to simulate depth increasing toward a wall"""
+    def analyze_floor_slope(depths, y_coords, wall_depth, slope_jump_threshold=20):
+        """Analyze floor using a monotonic spline fit and extrapolate to find wall intersection point."""
         if len(depths) < 30:  # Need enough points for at least 3 groups
             return None, None
 
@@ -68,74 +67,91 @@ def find_wall_floor_intersections_for_frame(depth_map):
         # Calculate average slopes for groups of 10 points
         group_size = 10
         slopes = []
-        
+
         for i in range(0, len(depths) - group_size, group_size):
-            group1_depths = depths[i:i+group_size]
-            group1_y = y_coords[i:i+group_size]
-            
+            group1_depths = depths[i:i + group_size]
+            group1_y = y_coords[i:i + group_size]
+
             # Calculate average slope for this group using linear regression
             try:
                 slope, _ = np.polyfit(group1_depths, group1_y, 1)
                 slopes.append((slope, i))
             except:
                 continue
-        
+
         if len(slopes) < 3:  # Need at least 3 groups
             return None, None
-        
-        # Find all sequences of decreasing slopes
+
+        # Find all sequences of decreasing slopes with additional checks
         sequences = []
         current_sequence = []
-        
+
         for i in range(len(slopes)):
-            if not current_sequence:
-                current_sequence.append(slopes[i])
-            elif slopes[i][0] > current_sequence[-1][0]:  # Slope is increasing (becoming less negative)
-                current_sequence.append(slopes[i])
-            else:  # Slope increased, start new sequence
-                if len(current_sequence) >= 3:  # Only keep sequences with at least 3 groups
-                    sequences.append(current_sequence.copy())
-                current_sequence = [slopes[i]]
-        
+            slope, idx = slopes[i]
+
+            if current_sequence:
+                last_slope, last_idx = current_sequence[-1]
+                # Stop the sequence if:
+                # 1. The current slope is more negative than the last slope (indicating a reverse in direction).
+                # 2. The current slope is positive.
+                # 3. The jump between slopes exceeds the threshold.
+                if slope < last_slope or slope > 0 or abs(slope - last_slope) > slope_jump_threshold:
+                    if len(current_sequence) >= 3:  # Only keep sequences with at least 3 groups
+                        sequences.append(current_sequence.copy())
+                    current_sequence = []  # Start a new sequence
+
+            current_sequence.append((slope, idx))
+
         # Don't forget to check the last sequence
         if len(current_sequence) >= 3:
             sequences.append(current_sequence)
-        
+
         if not sequences:  # No valid sequences found
             return None, None
-        
+
         # Find the longest sequence
         longest_sequence = max(sequences, key=len)
-        
+
         if len(longest_sequence) < 3:  # Double check we have enough groups
             return None, None
-        
+
         # Get the range of points covered by the longest sequence
         start_idx = longest_sequence[0][1]
         end_idx = longest_sequence[-1][1] + group_size
 
-        # Select the points within this range for fitting and normalize depths
-        sequence_depths = depths[start_idx:end_idx]
-        sequence_y = y_coords[start_idx:end_idx]
-        max_depth = max(sequence_depths)
-        normalized_depths = sequence_depths / max_depth  # Scale to range [0, 1]
+        # Select the points within this range for fitting
+        sequence_depths = np.array(depths[start_idx:end_idx])
+        sequence_y = np.array(y_coords[start_idx:end_idx])
 
-        # Define an exponential decay function for a monotonic fit with bounded parameters
-        def exp_decay(x, a, b, c):
-            return a * np.exp(-b * x) + c
-
-        # Fit the data using exponential decay with bounds
+        # Apply monotonic spline fit using PchipInterpolator
         try:
-            params, pcov = curve_fit(exp_decay, normalized_depths, sequence_y, bounds=(0, [np.inf, 1, np.inf]), maxfev=10000)
-        except RuntimeError:
+            spline = PchipInterpolator(sequence_depths, sequence_y, extrapolate=False)
+        except ValueError:
             return None, None
 
-        # Define the fitted function using the parameters
+        # Define the fitted function with extrapolation support for scalar and array inputs
         def fitted_func(x):
-            return exp_decay(x / max_depth, *params)  # Scale input to fit function
+            x = np.asarray(x)  # Convert x to a numpy array to handle both scalars and arrays
+            within_range = x <= sequence_depths[-1]
 
+            # Use the spline within the range, and linear extrapolation outside the range
+            result = np.where(
+                within_range,
+                spline(x),  # Spline interpolation within the range
+                sequence_y[-1] + (x - sequence_depths[-1]) * (
+                        (sequence_y[-1] - sequence_y[-2]) / (sequence_depths[-1] - sequence_depths[-2]))
+                # Linear extrapolation
+            )
+            return result
 
-        return fitted_func, params
+        try:
+            intersection_y = fitted_func(wall_depth)
+            if np.isnan(intersection_y) or 0 > intersection_y or intersection_y > 480:
+                intersection_y = None
+        except Exception:
+            intersection_y = None
+
+        return fitted_func, intersection_y
 
     def analyze_edge_slope(depths, x_coords, from_left=True):
         """Analyze wall slope at frame edges"""
@@ -229,21 +245,12 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
         if wall_depth is not None:
             # Find floor curve starting from bottom of frame
-            floor_func, floor_params = analyze_floor_slope(valid_depths, valid_y)
+            floor_func, intersect_y = analyze_floor_slope(valid_depths, valid_y, wall_depth)
 
-            if floor_func is not None:
-                # Get intersection point by directly evaluating quadratic at wall depth
-                try:
-                    # The quadratic function already maps depth -> y
-                    intersect_y = floor_func(wall_depth)
-
-                    # Verify the intersection point is reasonable
-                    if not np.isnan(intersect_y) and 0 <= intersect_y <= 480:
-                        frame_x = x
-                        frame_y = intersect_y
-                        floor_wall_points.append((frame_x, frame_y))
-                except:
-                    continue
+            if intersect_y is not None:
+                frame_x = x
+                frame_y = intersect_y
+                floor_wall_points.append((frame_x, frame_y))
 
     # Convert points to lines
     intersection_lines = []
