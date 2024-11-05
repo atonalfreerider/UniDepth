@@ -5,6 +5,7 @@ import argparse
 from tqdm import tqdm
 import os
 
+import surface_detector
 from unidepth.models import UniDepthV2
 from unidepth.utils import colorize
 
@@ -67,6 +68,26 @@ def debug_video(video_path, output_dir):
             # Colorize the depth map with dynamic vmax
             depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=vmax, cmap="magma_r")
             debug_frame = cv2.cvtColor(depth_pred_col, cv2.COLOR_RGB2BGR)
+
+            intersection_lines = surface_detector.find_wall_floor_intersections_for_frame(depth_pred)
+
+            # Draw final intersection lines
+            for line_type, (p1, p2) in intersection_lines:
+                try:
+                    p1_depth = (int(p1[0]), int(p1[1]))
+                    p2_depth = (int(p2[0]), int(p2[1]))
+                    color = (0, 255, 255) if line_type == "wall" else (255, 255, 0)  # Cyan for wall, Yellow for floor
+                    cv2.line(debug_frame, p1_depth, p2_depth, color, 2)
+                except:
+                    continue
+
+            # Add text labels for clarity
+            cv2.putText(debug_frame, "Wall depths (green)", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(debug_frame, "Floor points (blue)", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+            cv2.putText(debug_frame, "Corner candidates (red)", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.putText(debug_frame, "Floor-wall intersections (cyan)", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 0), 1)
+
             out.write(debug_frame)
         else:
             print(f"Warning: Depth map for frame {frame_num} is missing or empty.")
@@ -97,5 +118,5 @@ if __name__ == "__main__":
 
     print("Torch version:", torch.__version__)
 
-    process_video(args.video_path, args.output_dir)
+    #process_video(args.video_path, args.output_dir)
     debug_video(args.video_path, args.output_dir)
