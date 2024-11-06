@@ -1,8 +1,10 @@
 import numpy as np
+import cv2
 from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
 from scipy.interpolate import PchipInterpolator
 
-def find_wall_floor_intersections_for_frame(depth_map):
+def find_wall_floor_intersections_for_frame(depth_map, debug_frame):
     """Find wall-floor and wall-wall intersections using vertical stripe analysis"""
     if depth_map is None:
         return []
@@ -18,6 +20,9 @@ def find_wall_floor_intersections_for_frame(depth_map):
 
     # Parameters for wall slope analysis
     edge_width = 50  # Width of edge region to analyze
+
+    # Set up matplotlib for interactive plotting
+    plt.ion()  # Turn on interactive mode
 
     def analyze_wall_depth(depths):
         """Analyze wall depth using first N points from top"""
@@ -289,6 +294,28 @@ def find_wall_floor_intersections_for_frame(depth_map):
                 floor_wall_points.append((frame_x, frame_y))
                 point_confidences.append(confidence)
 
+    def on_mouse_click(event, x, y, flags, param, current_depth_map):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            stripe_x = x
+            depths = current_depth_map[:, stripe_x]  # Use stored depth map
+            valid_mask = depths > 0
+            valid_depths = depths[valid_mask]
+            valid_y = np.arange(480)[valid_mask]
+
+            if len(valid_depths) >= 480 * 0.3:
+                wall_depth = analyze_wall_depth(valid_depths)
+                floor_func, intersect_y, confidence = detect_intersection_with_obstacle(valid_depths, valid_y, wall_depth)
+                plot_stripe_analysis(stripe_x, valid_depths, valid_y, wall_depth, floor_func, intersect_y, confidence)
+
+    # Storage for debug visualization
+    debug_points = {
+        'wall_depths': [],  # (x, depth) pairs
+        'floor_points': [],  # (x, y) pairs
+        'corner_candidates': [],  # x coordinates
+        'floor_wall_points': []  # (x, y) pairs
+    }
+
+    # Convert points to lines
     # Process floor-wall points with confidence weighting
     intersection_lines = []
     if corner_x is not None:
@@ -365,9 +392,26 @@ def find_wall_floor_intersections_for_frame(depth_map):
         depths = depth_map[:, x]
         valid_mask = depths > 0
         valid_depths = depths[valid_mask]
+        valid_y = np.arange(depth_map.shape[0])[valid_mask]
 
         if len(valid_depths) < depth_map.shape[0] * 0.3:
             continue
+
+        # Find wall depth
+        wall_depth = analyze_wall_depth(valid_depths)
+        if wall_depth is not None:
+            debug_points['wall_depths'].append((x, wall_depth))
+
+        # Find floor curve
+        floor_func, intersect_y, confidence = detect_intersection_with_obstacle(valid_depths, valid_y, wall_depth)
+        if floor_func is not None:
+            # Store floor points for visualization
+            test_depths = np.linspace(valid_depths.min(), valid_depths.max(), 20)
+            floor_y_values = floor_func(test_depths)
+            debug_points['floor_points'].extend(zip([x] * len(test_depths), floor_y_values))
+
+        if intersect_y is not None:
+            debug_points['floor_wall_points'].append((x, intersect_y))
 
     # Process horizontal stripes for corner detection
     corner_candidates = []
@@ -387,4 +431,96 @@ def find_wall_floor_intersections_for_frame(depth_map):
         if analyze_corner_point(valid_depths, max_depth_idx):
             corner_candidates.append((valid_x[max_depth_idx], y))
 
+    # Draw debug visualization
+    # Draw wall depths
+    for x, depth in debug_points['wall_depths']:
+        try:
+            cv2.circle(debug_frame, (int(x), int(depth)), 2, (0, 255, 0), -1)  # Green
+        except:
+            continue
+
+    # Draw floor points
+    for x, y in debug_points['floor_points']:
+        try:
+            if not np.isnan(x) and not np.isnan(y):
+                cv2.circle(debug_frame, (int(x), int(y)), 2, (255, 0, 0), -1)  # Blue
+        except:
+            continue
+
+    # Draw corner candidates in red
+    for x, y in corner_candidates:
+        try:
+            cv2.circle(debug_frame, (int(x), int(y)), 3, (0, 0, 255), -1)  # Red
+        except:
+            continue
+
+    # Draw floor-wall intersection points in cyan
+    for x, y in debug_points['floor_wall_points']:
+        try:
+            cv2.circle(debug_frame, (int(x), int(y)), 4, (255, 255, 0), -1)  # Cyan (255, 255, 0)
+        except:
+            continue
+
+    # Draw final intersection lines
+    for line_type, (p1, p2) in intersection_lines:
+        try:
+            p1_depth = (int(p1[0]), int(p1[1]))
+            p2_depth = (int(p2[0]), int(p2[1]))
+            color = (0, 255, 255) if line_type == "wall" else (255, 255, 0)  # Cyan for wall, Yellow for floor
+            cv2.line(debug_frame, p1_depth, p2_depth, color, 2)
+        except:
+            continue
+
+    # Add text labels for clarity
+    cv2.putText(debug_frame, "Wall depths (green)", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(debug_frame, "Floor points (blue)", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+    cv2.putText(debug_frame, "Corner candidates (red)", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    cv2.putText(debug_frame, "Floor-wall intersections (cyan)", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (255, 255, 0), 1)
+
+    # Show debug visualization
+    cv2.imshow('Depth Analysis Debug', debug_frame)
+    cv2.waitKey(1)
+
+    # Create window and set mouse callback
+    cv2.namedWindow('Depth Analysis Debug')
+    cv2.setMouseCallback('Depth Analysis Debug',
+                         lambda event, x, y, flags, param: on_mouse_click(event, x, y, flags, param, depth_map))
+
     return intersection_lines
+
+def plot_stripe_analysis(x, depths, y_coords, wall_depth, floor_func, intersect_y, confidence):
+    """Plot depth analysis for a single vertical stripe"""
+
+    stripe_fig = plt.figure(figsize=(8, 6))
+    stripe_ax = stripe_fig.add_subplot(111)
+
+    # Plot actual depth values
+    stripe_ax.scatter(depths, y_coords, c='blue', s=10, label='Depth measurements')
+
+    if wall_depth is not None:
+        stripe_ax.axvline(x=wall_depth, color='red', linestyle='--', label=f'Wall depth: {wall_depth:.2f}')
+
+    if floor_func is not None:
+        # Plot quadratic fit
+        test_depths = np.linspace(np.min(depths), np.max(depths), 100)
+        fit_y = floor_func(test_depths)
+        stripe_ax.plot(test_depths, fit_y, 'g-', label='Floor fit')
+
+    # Plot intersection point
+    if wall_depth is not None and intersect_y is not None:
+        stripe_ax.plot(wall_depth, intersect_y, 'cyan', marker='o', markersize=10,
+                       label=f'Intersection: ({wall_depth:.2f}, {intersect_y:.2f})')
+
+
+    stripe_ax.set_title(f'Depth Analysis for Vertical Stripe at x={x}')
+    stripe_ax.set_xlabel('Depth')
+    stripe_ax.set_ylabel('Y coordinate')
+    stripe_ax.invert_yaxis()
+    stripe_ax.grid(True)
+    stripe_ax.legend()
+
+    stripe_fig.tight_layout()
+    stripe_fig.canvas.draw()
+    stripe_fig.canvas.flush_events()
+

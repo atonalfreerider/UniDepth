@@ -66,8 +66,13 @@ def debug_video(video_path, output_dir):
         depth_pred = load_depth_map(output_dir, frame_num)
 
         if depth_pred is not None:
+            # Rest of the visualization code...
+            vmax = depth_pred.max()
+            depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=vmax, cmap="magma_r")
+            debug_frame = cv2.cvtColor(depth_pred_col, cv2.COLOR_RGB2BGR)
+
             # Get intersection lines for current frame
-            intersection_lines = surface_detector.find_wall_floor_intersections_for_frame(depth_pred)
+            intersection_lines = surface_detector.find_wall_floor_intersections_for_frame(depth_pred, debug_frame)
             
             # Convert intersection lines to serializable format
             frame_data = []
@@ -80,11 +85,6 @@ def debug_video(video_path, output_dir):
                 frame_data.append(line_data)
             
             all_intersections.append(frame_data)
-
-            # Rest of the visualization code...
-            vmax = depth_pred.max()
-            depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=vmax, cmap="magma_r")
-            debug_frame = cv2.cvtColor(depth_pred_col, cv2.COLOR_RGB2BGR)
 
             # Draw final intersection lines
             for line_type, (p1, p2) in intersection_lines:
@@ -102,7 +102,9 @@ def debug_video(video_path, output_dir):
             cv2.putText(debug_frame, "Wall-wall intersections (yellow)", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0, 255, 255), 1)
 
-            out.write(debug_frame)
+            # Show debug visualization
+            cv2.imshow('Depth Analysis Debug', debug_frame)
+            cv2.waitKey(0)
         else:
             print(f"Warning: Depth map for frame {frame_num} is missing or empty.")
             all_intersections.append([])  # Add empty list for frames with no data
