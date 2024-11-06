@@ -185,6 +185,7 @@ def find_wall_floor_intersections_for_frame(depth_map):
         # Fit line to edge points
         try:
             slope, _ = np.polyfit(edge_x, edge_depths, 1)
+            # Convert slope to cm/pixel (assuming depths are in cm)
             return slope
         except:
             return None
@@ -207,11 +208,11 @@ def find_wall_floor_intersections_for_frame(depth_map):
         right_slope = analyze_edge_slope(valid_depths, valid_x, from_left=False)
 
         if left_slope is not None and right_slope is not None:
-            # Check if slopes indicate a corner
-            if left_slope * right_slope < 0:  # Slopes in opposite directions
-                has_corner = True
-                break
-            elif abs(left_slope - right_slope) > slope_difference_threshold:
+            # Check if left slope is positive (getting deeper as x increases)
+            # and right slope is negative (getting deeper as x decreases)
+            # and at least one slope has magnitude >= 1 cm/pixel
+            if (left_slope > 0 and right_slope < 0 and 
+                (abs(left_slope) >= 0.01 or abs(right_slope) >= 0.01)):
                 has_corner = True
                 break
 
